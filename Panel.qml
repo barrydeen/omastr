@@ -66,6 +66,7 @@ Panel {
       sockets: client.socketCount,
       relays: client.relays.length,
       notifs: client.notifications.length,
+      muted: Object.keys(client.mutedAuthors).length,
       error: client.error,
       settingsMode: root.showSettings,
       gearW: navButton.width
@@ -524,8 +525,18 @@ Panel {
                       text: root.typeIcon(modelData.type) + " " + root.typeLabel(modelData.type)
                       color: root.typeColor(modelData.type)
                       font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                      font.pixelSize: Style.font.bodySmall
-                    }
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          Text {
+            visible: Object.keys(client.mutedAuthors).length > 0
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: Object.keys(client.mutedAuthors).length + " muted accounts hidden from notifications."
+            color: Util.alpha(root.bar ? root.bar.foreground : Color.popups.text, 0.5)
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.bodySmall
+          }
                   }
                 }
               }

@@ -38,6 +38,9 @@ Click the Omastr icon in the bar to open your notifications feed.
 - The gear opens Settings: default web client, per-type notification filters
   (replies & mentions, reposts, reactions, zaps), your connected relays and
   disconnect.
+- Your public NIP-51 mute list is honored: notifications from muted accounts
+  are hidden automatically (encrypted private mutes can't be read without
+  your nsec, so only public mutes apply).
 - Newly arriving events also send a desktop notification (with sender avatar),
   clickable to the same deep link.
 - Right-click the bar icon refreshes subscriptions (usually unnecessary —

@@ -353,6 +353,22 @@ function truncateText(text, max) {
 }
 
 // Kind -> notification type, or "" for events that are not notifications.
+// NIP-51 mute list (kind 10000): public `p` tags are muted pubkeys.
+// Encrypted private mutes in `content` are unreadable to a read-only
+// client, so only the public list applies.
+function muteListAuthors(ev) {
+  var out = []
+  var tags = ev && ev.tags ? ev.tags : []
+  for (var i = 0; i < tags.length; i++) {
+    var t = tags[i]
+    if (t && t[0] === "p" && typeof t[1] === "string" && /^[0-9a-f]{64}$/i.test(t[1])) {
+      var h = t[1].toLowerCase()
+      if (out.indexOf(h) === -1) out.push(h)
+    }
+  }
+  return out
+}
+
 function notificationType(ev, myHex) {
   var kind = ev.kind
   if (kind === 9735) return "zap"

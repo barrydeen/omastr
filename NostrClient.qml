@@ -30,6 +30,7 @@ Item {
 
   readonly property string subOutbox: "omn_outbox"
   readonly property string subFeed: "omn_feed"
+  readonly property string subMutes: "omn_mutes"
   readonly property string subProfiles: "omn_profiles"
   readonly property string subEvents: "omn_events"
 
@@ -37,6 +38,7 @@ Item {
 
   property var sockets: []
   property var seen: ({})
+  property var mutedAuthors: ({})     // NIP-51 kind 10000 `p` tags, lowercase hex
   property var wantedAuthors: ({})
   property var wantedEvents: ({})
   property var pendingNotify: []          // rows waiting for profiles before desktop ping
@@ -227,6 +229,7 @@ Item {
       relay.sendRaw(JSON.stringify(["REQ", root.subOutbox, { kinds: [10002], authors: [root.pubkey], limit: 1 }]))
     } else {
       relay.sendRaw(JSON.stringify(["REQ", root.subFeed, feedFilter()]))
+      relay.sendRaw(JSON.stringify(["REQ", root.subMutes, mutesFilter()]))
       relay.sendRaw(JSON.stringify(["REQ", root.subProfiles, profilesFilter()]))
       relay.sendRaw(JSON.stringify(["REQ", root.subEvents, eventsFilter()]))
     }
@@ -256,6 +259,35 @@ Item {
 
   function profilesFilter() {
     return { kinds: [0], authors: Object.keys(root.wantedAuthors) }
+  }
+
+  // Own NIP-51 mute list; refreshed on every (re)subscribe.
+  function mutesFilter() {
+    return { kinds: [10000], authors: [root.pubkey], limit: 1 }
+  }
+
+  // Rebuild the mute set and drop any visible rows from muted authors.
+  // Dropped ids are un-forgotten so unmuting can re-pull them.
+  function applyMuteList(list) {
+    var muted = ({})
+    for (var i = 0; i < list.length; i++) muted[list[i]] = true
+    root.mutedAuthors = muted
+
+    var kept = []
+    var dropped = false
+    for (var j = 0; j < root.notifications.length; j++) {
+      var n = root.notifications[j]
+      if (muted[n.author]) {
+        root.seen[n.id] = false
+        dropped = true
+      } else {
+        kept.push(n)
+      }
+    }
+    if (dropped) {
+      root.notifications = kept
+      updateUnread()
+    }
   }
 
   function eventsFilter() {
@@ -364,10 +396,18 @@ Item {
       return
     }
 
+    if (subId === root.subMutes) {
+      if (ev.kind !== 10000 || ev.pubkey.toLowerCase() !== root.pubkey) return
+      root.applyMuteList(Nostr.muteListAuthors(ev))
+      return
+    }
+
     if (subId !== root.subFeed) return
 
     var n = Nostr.notificationFromEvent(ev, root.pubkey)
     if (!n) return
+    // Muted authors never surface; don't mark seen so unmuting re-pulls them.
+    if (root.mutedAuthors[n.author]) return
     // Filtered-out type: don't mark seen, so re-enabling can re-pull it.
     if (!root.typeEnabled(n.type)) return
     root.seen[ev.id] = true
