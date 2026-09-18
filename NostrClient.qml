@@ -234,7 +234,10 @@ Item {
 
   function feedKinds() {
     var k = []
-    if (root.typeEnabled("reply") || root.typeEnabled("mention")) k.push(1)
+    if (root.typeEnabled("reply") || root.typeEnabled("mention")) {
+      k.push(1)
+      k.push(1111)   // NIP-22 comments
+    }
     if (root.typeEnabled("repost")) k.push(6)
     if (root.typeEnabled("reaction")) k.push(7)
     if (root.typeEnabled("zap")) k.push(9735)
@@ -453,7 +456,7 @@ Item {
       opts.kind = ref.kind
     } else if (n.refId === "") {
       opts.authorHex = n.author
-      opts.kind = 1
+      opts.kind = Number(n.kind) || 1
     }
     return Nostr.eventUrl(root.clientName, target, opts)
   }

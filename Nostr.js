@@ -260,13 +260,17 @@ function reactionDisplay(content) {
 }
 
 function eventIdTag(tags) {
+  var upper = ""
   for (var i = 0; i < tags.length; i++) {
     var t = tags[i]
-    if (t && t[0] === "e" && typeof t[1] === "string" && /^[0-9a-f]{64}$/i.test(t[1])) {
-      return t[1].toLowerCase()
-    }
+    if (!t || typeof t[1] !== "string" || !/^[0-9a-f]{64}$/i.test(t[1])) continue
+    if (t[0] === "e") return t[1].toLowerCase()
+    // NIP-22 points at the parent with lowercase e; top-level comments on
+    // non-note content may only carry the uppercase root E, which doubles
+    // as the context link.
+    if (t[0] === "E" && upper === "") upper = t[1].toLowerCase()
   }
-  return ""
+  return upper
 }
 
 // First http(s) media URL in a note body (client links usually carry a file
@@ -313,6 +317,7 @@ function notificationFromEvent(ev, myHex) {
   return {
     id: ev.id,
     type: type,
+    kind: Number(ev.kind) || 0,
     author: author.toLowerCase(),
     created: Number(ev.created_at) || 0,
     detail: detail,
@@ -355,6 +360,11 @@ function notificationType(ev, myHex) {
   if (kind === 7) return "reaction"
   if (kind === 1) {
     return hasTag(ev.tags || [], "e") ? "reply" : "mention"
+  }
+  // NIP-22 comments: lowercase e is the parent item, uppercase E the root
+  // scope (may be all a top-level comment on non-note content carries).
+  if (kind === 1111) {
+    return hasTag(ev.tags || [], "e") || hasTag(ev.tags || [], "E") ? "reply" : "mention"
   }
   return ""
 }
