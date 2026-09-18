@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.barrydeen.omastr",
+  "name": "Omastr",
+  "version": "1.0.0",
+  "author": "barrydeen",
+  "license": "MIT",
+  "description": "Read-only Nostr notifications in the Omarchy bar: zaps, replies, mentions, reposts and reactions with inline media.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Omastr",
+    "description": "Nostr notifications feed with inline media and per-type filters",
+    "category": "Social",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
