@@ -81,6 +81,14 @@ Panel {
     function toggle(group: string): void {
       client.setGroupEnabled(group, !client.isGroupEnabled(group))
     }
+    function mutes(): void {
+      var per = {}
+      for (var r in client.mutedByRelay) per[r] = client.mutedByRelay[r].length
+      console.log("nostr-debug: mutes", JSON.stringify({ perRelay: per, total: Object.keys(client.mutedAuthors).length }))
+    }
+    function authors(): void {
+      console.log("nostr-debug: authors", JSON.stringify(client.notifications.map(function (n) { return n.author })))
+    }
     function firstUrl(): void {
       if (client.notifications.length > 0)
         console.log("nostr-debug: url", client.notificationUrl(client.notifications[0]))
@@ -708,6 +716,74 @@ Panel {
                 onClicked: client.setGroupEnabled(modelData.group, !checked)
               }
             }
+          }
+
+          PanelSeparator { width: parent.width }
+
+          Text {
+            text: "BLOCKED"
+            color: Util.alpha(root.bar ? root.bar.foreground : Color.popups.text, 0.5)
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.caption
+            font.bold: true
+          }
+
+          TextField {
+            id: blockField
+            width: parent.width
+            placeholderText: "npub1… or hex"
+            foreground: root.bar ? root.bar.foreground : Color.popups.text
+            onAccepted: { if (client.addBlocked(text)) text = "" }
+          }
+
+          Button {
+            text: "Block"
+            foreground: root.bar ? root.bar.foreground : Color.popups.text
+            onClicked: { if (client.addBlocked(blockField.text)) blockField.text = "" }
+          }
+
+          Column {
+            visible: client.blockedAuthors.length > 0
+            width: parent.width
+            spacing: Style.space(4)
+
+            Repeater {
+              model: client.blockedAuthors
+
+              Row {
+                required property var modelData
+                width: parent.width
+                spacing: Style.space(8)
+
+                Text {
+                  width: parent.width - unblockButton.width - parent.spacing
+                  elide: Text.ElideMiddle
+                  verticalAlignment: Text.AlignVCenter
+                  height: unblockButton.height
+                  text: Nostr.shortHex(modelData)
+                  color: Util.alpha(root.bar ? root.bar.foreground : Color.popups.text, 0.65)
+                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.pixelSize: Style.font.bodySmall
+                }
+
+                Button {
+                  id: unblockButton
+                  text: "✕"
+                  tooltipText: "Unblock"
+                  foreground: root.bar ? root.bar.foreground : Color.popups.text
+                  onClicked: client.removeBlocked(modelData)
+                }
+              }
+            }
+          }
+
+          Text {
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: "Public NIP-51 mutes apply automatically; this list covers the rest."
+            color: Util.alpha(root.bar ? root.bar.foreground : Color.popups.text, 0.5)
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.bodySmall
           }
 
           PanelSeparator { width: parent.width }

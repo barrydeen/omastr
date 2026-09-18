@@ -38,7 +38,13 @@ Item {
 
   property var sockets: []
   property var seen: ({})
-  property var mutedAuthors: ({})     // NIP-51 kind 10000 `p` tags, lowercase hex
+  property var mutedAuthors: ({})     // union of NIP-51 kind 10000 `p` tags, lowercase hex
+  property var mutedByRelay: ({})     // relay url -> [hex], so one relay's
+                                      // stale/empty list can't wipe another's
+  // Local blocklist (npub/hex added in settings): guaranteed to apply even
+  // when mutes only exist as encrypted private list items, which a
+  // read-only client cannot decrypt.
+  property var blockedAuthors: []
   property var wantedAuthors: ({})
   property var wantedEvents: ({})
   property var pendingNotify: []          // rows waiting for profiles before desktop ping
@@ -112,6 +118,14 @@ Item {
       var ts = st.types.filter(function (t) { return all.indexOf(t) !== -1 })
       if (ts.length > 0) root.enabledTypes = ts
     }
+    if (Array.isArray(st.blocked)) {
+      root.blockedAuthors = st.blocked.filter(function (h) {
+        return typeof h === "string" && /^[0-9a-f]{64}$/.test(h)
+      }).map(function (h) { return h.toLowerCase() })
+    } else {
+      // No stored list yet: seed with the locally reported block.
+      root.blockedAuthors = ["d7100f9e3079cb803be226e198269bf9aa8d1e7576d7fbe27a009a3a1780be22"]
+    }
     var hex = Nostr.npubToHex(st.npub || "")
     if (hex === "" || hex === root.pubkey) return
     root.npub = Nostr.hexToNpub(hex)
@@ -132,7 +146,8 @@ Item {
       relays: root.relays,
       lastRead: root.lastRead,
       clientName: root.clientName,
-      types: root.enabledTypes
+      types: root.enabledTypes,
+      blocked: root.blockedAuthors
     }, null, 2)
     saveProc.command = ["bash", "-c",
       "mkdir -p \"$HOME/.local/state/omarchy/settings\" && printf '%s' \"$1\" > \"$HOME/.local/state/omarchy/settings/nostr-notifications.json\"",
@@ -266,18 +281,38 @@ Item {
     return { kinds: [10000], authors: [root.pubkey], limit: 1 }
   }
 
-  // Rebuild the mute set and drop any visible rows from muted authors.
-  // Dropped ids are un-forgotten so unmuting can re-pull them.
-  function applyMuteList(list) {
-    var muted = ({})
-    for (var i = 0; i < list.length; i++) muted[list[i]] = true
-    root.mutedAuthors = muted
+  // Rebuild the mute set as the union of every relay's list, then drop any
+  // visible rows from muted authors. Dropped ids are un-forgotten so
+  // unmuting can re-pull them.
+  function applyMuteList(list, relayUrl) {
+    var byRelay = ({})
+    for (var k in root.mutedByRelay) byRelay[k] = root.mutedByRelay[k]
+    byRelay[String(relayUrl || "unknown")] = list
+    root.mutedByRelay = byRelay
 
+    var muted = ({})
+    for (var r in byRelay) {
+      var entries = byRelay[r]
+      for (var i = 0; i < entries.length; i++) muted[entries[i]] = true
+    }
+    root.mutedAuthors = muted
+    root.pruneBlocked()
+  }
+
+  function isBlocked(hex) {
+    var h = String(hex || "").toLowerCase()
+    if (root.mutedAuthors[h]) return true
+    return root.blockedAuthors.indexOf(h) !== -1
+  }
+
+  // Drop visible rows from blocked/muted authors; un-forget their ids so
+  // unblocking re-pulls them on the next resubscribe.
+  function pruneBlocked() {
     var kept = []
     var dropped = false
     for (var j = 0; j < root.notifications.length; j++) {
       var n = root.notifications[j]
-      if (muted[n.author]) {
+      if (root.isBlocked(n.author)) {
         root.seen[n.id] = false
         dropped = true
       } else {
@@ -288,6 +323,31 @@ Item {
       root.notifications = kept
       updateUnread()
     }
+  }
+
+  function addBlocked(input) {
+    var raw = String(input || "").trim()
+    var hex = Nostr.npubToHex(raw)
+    if (hex === "") {
+      var t = raw.toLowerCase()
+      if (/^[0-9a-f]{64}$/.test(t)) hex = t
+    }
+    if (hex === "" || root.isBlocked(hex)) return false
+    var list = root.blockedAuthors.slice()
+    list.push(hex)
+    root.blockedAuthors = list
+    root.saveState()
+    root.pruneBlocked()
+    return true
+  }
+
+  function removeBlocked(hex) {
+    var h = String(hex || "").toLowerCase()
+    var list = root.blockedAuthors.filter(function (x) { return x !== h })
+    if (list.length === root.blockedAuthors.length) return
+    root.blockedAuthors = list
+    root.saveState()
+    if (!root.resolving) root.resubscribe()
   }
 
   function eventsFilter() {
@@ -398,7 +458,7 @@ Item {
 
     if (subId === root.subMutes) {
       if (ev.kind !== 10000 || ev.pubkey.toLowerCase() !== root.pubkey) return
-      root.applyMuteList(Nostr.muteListAuthors(ev))
+      root.applyMuteList(Nostr.muteListAuthors(ev), relayUrl)
       return
     }
 
@@ -406,8 +466,9 @@ Item {
 
     var n = Nostr.notificationFromEvent(ev, root.pubkey)
     if (!n) return
-    // Muted authors never surface; don't mark seen so unmuting re-pulls them.
-    if (root.mutedAuthors[n.author]) return
+    // Blocked/muted authors never surface; don't mark seen so unblocking
+    // re-pulls them.
+    if (root.isBlocked(n.author)) return
     // Filtered-out type: don't mark seen, so re-enabling can re-pull it.
     if (!root.typeEnabled(n.type)) return
     root.seen[ev.id] = true
@@ -453,7 +514,7 @@ Item {
   // headline/description/image/click-action to omarchy-notification-send.
   // The click action deep-links the referenced event in the configured client.
   function sendDesktopNotification(n) {
-    if (root.npub === "" || !root.typeEnabled(n.type)) return
+    if (root.npub === "" || !root.typeEnabled(n.type) || root.isBlocked(n.author)) return
     var who = Nostr.profileLabel(root.profiles[n.author], n.author)
     var pic = root.profiles[n.author] ? root.profiles[n.author].picture : ""
     var url = root.notificationUrl(n)
