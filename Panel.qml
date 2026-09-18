@@ -114,7 +114,7 @@ Panel {
   // One Relay delegate per url; recreates whenever the relay list changes
   // (including the bootstrap -> author-relay-list swap during setup).
   Repeater {
-    model: client.pubkey === "" ? [] : client.relays
+    model: client.pubkey === "" ? [] : client.allRelays
     Relay {
       required property string modelData
       url: modelData
@@ -840,12 +840,45 @@ Panel {
             font.bold: true
           }
 
+          Text {
+            text: "Read (inbox) — feed"
+            color: Util.alpha(root.bar ? root.bar.foreground : Color.popups.text, 0.45)
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.bodySmall
+          }
+
           Column {
             width: parent.width
             spacing: Style.space(3)
 
             Repeater {
               model: client.relays
+
+              Text {
+                required property var modelData
+                width: parent.width
+                elide: Text.ElideMiddle
+                text: "•  " + modelData.replace("wss://", "").replace("ws://", "")
+                color: Util.alpha(root.bar ? root.bar.foreground : Color.popups.text, 0.65)
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.bodySmall
+              }
+            }
+          }
+
+          Text {
+            text: "Write (outbox) — mutes"
+            color: Util.alpha(root.bar ? root.bar.foreground : Color.popups.text, 0.45)
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          Column {
+            width: parent.width
+            spacing: Style.space(3)
+
+            Repeater {
+              model: client.writeRelays
 
               Text {
                 required property var modelData

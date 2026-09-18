@@ -40,7 +40,8 @@ Click the Omastr icon in the bar to open your notifications feed.
   disconnect.
 - Your public NIP-51 mute list is honored: notifications from muted accounts
   are hidden automatically (encrypted private mutes can't be read without
-  your nsec, so only public mutes apply).
+  your nsec, so only public mutes apply). The list is fetched from your
+  write (outbox) relays per NIP-65; the feed itself stays on read relays.
 - Newly arriving events also send a desktop notification (with sender avatar),
   clickable to the same deep link.
 - Right-click the bar icon refreshes subscriptions (usually unnecessary —

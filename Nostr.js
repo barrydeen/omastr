@@ -180,13 +180,23 @@ function eventUrl(clientName, idHex, opts) {
 
 // Read relays (NIP-01 kind 10002) - tag ["r", url, marker?]; marker read or absent.
 function readRelaysFromEvent(ev) {
+  return relaysByMarker(ev, ["", "read"])
+}
+
+// Write (outbox) relays: marker write or absent. Replaceable events such as
+// the NIP-51 mute list live here, not on inbox/read relays.
+function readWriteRelaysFromEvent(ev) {
+  return relaysByMarker(ev, ["", "write"])
+}
+
+function relaysByMarker(ev, markers) {
   var out = []
   var tags = ev && ev.tags ? ev.tags : []
   for (var i = 0; i < tags.length; i++) {
     var t = tags[i]
     if (t && t[0] === "r" && typeof t[1] === "string" && t[1].indexOf("wss://") === 0) {
       var marker = t.length > 2 ? t[2] : ""
-      if (marker === "" || marker === "read") {
+      if (markers.indexOf(marker) !== -1) {
         if (out.indexOf(t[1]) === -1) out.push(t[1])
       }
     }

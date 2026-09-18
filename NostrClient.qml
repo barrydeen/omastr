@@ -15,8 +15,12 @@ Item {
   property string npub: ""
   property string pubkey: ""              // hex
   property string clientName: "primal"    // deep-link target for clicks
-  property var relays: []                 // what we keep connected to
+  property var relays: []                 // read (inbox) relays: feed lives here
+  property var writeRelays: []            // write (outbox) relays: mutes live here
+  property var allRelays: []              // union; what we keep connected to
   property bool resolving: false          // kind 10002 lookup in flight
+  property bool refreshingRelays: false   // background kind 10002 refresh;
+                                          // feed stays live meanwhile
   property bool synced: false             // feed caught up with history
   property string error: ""
   property int lastRead: 0
@@ -133,7 +137,18 @@ Item {
     root.wantProfile(hex)
     var r = Array.isArray(st.relays) ? st.relays.filter(function (u) { return typeof u === "string" && u.indexOf("wss://") === 0 }) : []
     root.relays = r.length > 0 ? r : Nostr.fallbackRelays()
+    var w = Array.isArray(st.writeRelays) ? st.writeRelays.filter(function (u) { return typeof u === "string" && u.indexOf("wss://") === 0 }) : []
+    root.writeRelays = w.length > 0 ? w : root.relays.slice()
+    // Stored lists may predate the read/write split (or have gone stale):
+    // keep the feed live on stored relays while re-resolving kind 10002
+    // on bootstrap relays in the background.
+    root.refreshingRelays = true
+    var conn = root.relays.slice()
+    var boot = Nostr.bootstrapRelays()
+    for (var b = 0; b < boot.length; b++) if (conn.indexOf(boot[b]) === -1) conn.push(boot[b])
+    root.allRelays = conn
     root.lastRead = Number(st.lastRead) || 0
+    resolveTimer.restart()
   }
 
   Process {
@@ -144,6 +159,7 @@ Item {
     var payload = JSON.stringify({
       npub: root.npub,
       relays: root.relays,
+      writeRelays: root.writeRelays,
       lastRead: root.lastRead,
       clientName: root.clientName,
       types: root.enabledTypes,
@@ -185,7 +201,10 @@ Item {
     root.wantProfile(hex)
     root.synced = false
     root.resolving = true
+    root.refreshingRelays = false
     root.relays = Nostr.bootstrapRelays()
+    root.writeRelays = []
+    root.updateConnectionUrls()
     root.saveState()
     resolveTimer.restart()
   }
@@ -194,6 +213,8 @@ Item {
     root.npub = ""
     root.pubkey = ""
     root.relays = []
+    root.writeRelays = []
+    root.updateConnectionUrls()
     root.notifications = []
     root.profiles = ({})
     root.fetchedEvents = ({})
@@ -201,6 +222,7 @@ Item {
     root.pendingNotify = []
     root.synced = false
     root.resolving = false
+    root.refreshingRelays = false
     root.error = ""
     root.saveState()
   }
@@ -210,11 +232,37 @@ Item {
     id: resolveTimer
     interval: 8000
     onTriggered: {
+      if (root.refreshingRelays) {
+        root.refreshingRelays = false
+        root.writeRelays = root.relays.slice()
+        root.updateConnectionUrls()
+        root.saveState()
+      }
       if (!root.resolving) return
       root.resolving = false
       root.relays = Nostr.fallbackRelays()
+      root.writeRelays = Nostr.fallbackRelays()
+      root.updateConnectionUrls()
       root.saveState()
     }
+  }
+
+  // Union of read + write relays; drives the Relay delegates. Read relays
+  // stay first so existing delegates (and their sockets) are preserved.
+  function updateConnectionUrls() {
+    var out = root.relays.slice()
+    for (var i = 0; i < root.writeRelays.length; i++) {
+      if (out.indexOf(root.writeRelays[i]) === -1) out.push(root.writeRelays[i])
+    }
+    root.allRelays = out
+  }
+
+  function isReadRelay(url) {
+    return root.relays.indexOf(url) !== -1
+  }
+
+  function isWriteRelay(url) {
+    return root.writeRelays.indexOf(url) !== -1
   }
 
   // ---------- Sockets ----------
@@ -235,18 +283,35 @@ Item {
 
   function broadcast(msg) {
     var json = JSON.stringify(msg)
-    for (var i = 0; i < root.sockets.length; i++) root.sockets[i].sendRaw(json)
+    for (var i = 0; i < root.sockets.length; i++) {
+      // Profile/event backfill belongs on read relays only.
+      if (root.relays.indexOf(root.sockets[i].url) === -1) continue
+      root.sockets[i].sendRaw(json)
+    }
   }
 
   function subscribeTo(relay) {
     if (root.pubkey === "") return
     if (root.resolving) {
       relay.sendRaw(JSON.stringify(["REQ", root.subOutbox, { kinds: [10002], authors: [root.pubkey], limit: 1 }]))
-    } else {
+      return
+    }
+    // Background relay-list refresh: outbox lookup on bootstrap relays
+    // while the normal subscriptions stay live everywhere else.
+    if (root.refreshingRelays && Nostr.bootstrapRelays().indexOf(relay.url) !== -1) {
+      relay.sendRaw(JSON.stringify(["REQ", root.subOutbox, { kinds: [10002], authors: [root.pubkey], limit: 1 }]))
+    }
+    if (root.relays.indexOf(relay.url) !== -1) {
       relay.sendRaw(JSON.stringify(["REQ", root.subFeed, feedFilter()]))
-      relay.sendRaw(JSON.stringify(["REQ", root.subMutes, mutesFilter()]))
       relay.sendRaw(JSON.stringify(["REQ", root.subProfiles, profilesFilter()]))
       relay.sendRaw(JSON.stringify(["REQ", root.subEvents, eventsFilter()]))
+      // A relay can be both read and write; the mute list lives on the
+      // write side.
+      if (root.writeRelays.indexOf(relay.url) !== -1) {
+        relay.sendRaw(JSON.stringify(["REQ", root.subMutes, mutesFilter()]))
+      }
+    } else if (root.writeRelays.indexOf(relay.url) !== -1) {
+      relay.sendRaw(JSON.stringify(["REQ", root.subMutes, mutesFilter()]))
     }
   }
 
@@ -423,11 +488,20 @@ Item {
   function handleEvent(ev, subId, relayUrl) {
     if (!ev || typeof ev.pubkey !== "string") return
 
-    if (root.resolving && Nostr.isMyRelayList(ev, root.pubkey)) {
+    if ((root.resolving || root.refreshingRelays) && Nostr.isMyRelayList(ev, root.pubkey)) {
+      var wasResolving = root.resolving
       root.resolving = false
+      root.refreshingRelays = false
       var r = Nostr.readRelaysFromEvent(ev)
       root.relays = r.length > 0 ? r : Nostr.fallbackRelays()
+      var w = Nostr.readWriteRelaysFromEvent(ev)
+      root.writeRelays = w.length > 0 ? w : Nostr.fallbackRelays()
+      root.updateConnectionUrls()
       root.saveState()
+      // Foreground setup resolves before any subscription exists; a
+      // background refresh must re-subscribe existing sockets so role
+      // changes (new write relays) take effect.
+      if (!wasResolving) root.resubscribe()
       return
     }
 
