@@ -247,12 +247,19 @@ Item {
     }
   }
 
-  // Union of read + write relays; drives the Relay delegates. Read relays
-  // stay first so existing delegates (and their sockets) are preserved.
+  // Union of read + write + bootstrap relays; drives the Relay delegates. Read
+  // relays stay first so existing delegates (and their sockets) are preserved.
+  // The bootstrap indexers stay connected too: they hold kind 0 for far more
+  // authors than a personal inbox relay, and the backfill subscriptions are
+  // sent to them (see isBackfillRelay).
   function updateConnectionUrls() {
     var out = root.relays.slice()
     for (var i = 0; i < root.writeRelays.length; i++) {
       if (out.indexOf(root.writeRelays[i]) === -1) out.push(root.writeRelays[i])
+    }
+    var boot = Nostr.bootstrapRelays()
+    for (var b = 0; b < boot.length; b++) {
+      if (out.indexOf(boot[b]) === -1) out.push(boot[b])
     }
     root.allRelays = out
   }
@@ -281,11 +288,20 @@ Item {
     }
   }
 
-  function broadcast(msg) {
+  // Profile and parent-event backfill is not role-scoped: bootstrap
+  // indexers (nos.lol, purplepag.es, damus) hold kind 0 for far more
+  // authors than a personal inbox relay does, so the side fetches go to
+  // read relays plus the bootstrap set. The feed and the mute list keep
+  // their read/write roles.
+  function isBackfillRelay(url) {
+    return root.relays.indexOf(url) !== -1 ||
+      Nostr.bootstrapRelays().indexOf(url) !== -1
+  }
+
+  function broadcastBackfill(msg) {
     var json = JSON.stringify(msg)
     for (var i = 0; i < root.sockets.length; i++) {
-      // Profile/event backfill belongs on read relays only.
-      if (root.relays.indexOf(root.sockets[i].url) === -1) continue
+      if (!root.isBackfillRelay(root.sockets[i].url)) continue
       root.sockets[i].sendRaw(json)
     }
   }
@@ -303,14 +319,14 @@ Item {
     }
     if (root.relays.indexOf(relay.url) !== -1) {
       relay.sendRaw(JSON.stringify(["REQ", root.subFeed, feedFilter()]))
+    }
+    if (root.isBackfillRelay(relay.url)) {
       relay.sendRaw(JSON.stringify(["REQ", root.subProfiles, profilesFilter()]))
       relay.sendRaw(JSON.stringify(["REQ", root.subEvents, eventsFilter()]))
-      // A relay can be both read and write; the mute list lives on the
-      // write side.
-      if (root.writeRelays.indexOf(relay.url) !== -1) {
-        relay.sendRaw(JSON.stringify(["REQ", root.subMutes, mutesFilter()]))
-      }
-    } else if (root.writeRelays.indexOf(relay.url) !== -1) {
+    }
+    // A relay can be both read and write; the mute list lives on the
+    // write side.
+    if (root.writeRelays.indexOf(relay.url) !== -1) {
       relay.sendRaw(JSON.stringify(["REQ", root.subMutes, mutesFilter()]))
     }
   }
@@ -450,13 +466,13 @@ Item {
   Timer {
     id: profilesTimer
     interval: 400
-    onTriggered: root.broadcast(["REQ", root.subProfiles, root.profilesFilter()])
+    onTriggered: root.broadcastBackfill(["REQ", root.subProfiles, root.profilesFilter()])
   }
 
   Timer {
     id: eventsTimer
     interval: 400
-    onTriggered: root.broadcast(["REQ", root.subEvents, root.eventsFilter()])
+    onTriggered: root.broadcastBackfill(["REQ", root.subEvents, root.eventsFilter()])
   }
 
   // ---------- Message handling ----------
