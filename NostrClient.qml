@@ -21,6 +21,11 @@ Item {
   property bool resolving: false          // kind 10002 lookup in flight
   property bool refreshingRelays: false   // background kind 10002 refresh;
                                           // feed stays live meanwhile
+  property int relayListAt: 0             // created_at of the applied list
+  property var bestRelayList: null        // newest kind 10002 seen in the
+                                          // current resolve window
+  property int pendingOutbox: 0           // relays asked for 10002 that have
+                                          // not sent EOSE yet
   property bool synced: false             // feed caught up with history
   property string error: ""
   property int lastRead: 0
@@ -143,11 +148,16 @@ Item {
     // keep the feed live on stored relays while re-resolving kind 10002
     // on bootstrap relays in the background.
     root.refreshingRelays = true
-    var conn = root.relays.slice()
-    var boot = Nostr.bootstrapRelays()
-    for (var b = 0; b < boot.length; b++) if (conn.indexOf(boot[b]) === -1) conn.push(boot[b])
-    root.allRelays = conn
+    // The connection set is the union of read, write and indexer relays - the
+    // same one updateConnectionUrls() builds. Assembling it by hand here left
+    // the write relays out, so the mute subscription had no socket at startup
+    // (upstream only got it right by accident, when the first indexer answer
+    // was applied on top).
+    root.updateConnectionUrls()
     root.lastRead = Number(st.lastRead) || 0
+    // Remember when the stored list was published, so a stale copy served by
+    // an indexer at startup cannot replace a newer list we already applied.
+    root.relayListAt = Number(st.relayListAt) || 0
     resolveTimer.restart()
   }
 
@@ -160,6 +170,7 @@ Item {
       npub: root.npub,
       relays: root.relays,
       writeRelays: root.writeRelays,
+      relayListAt: root.relayListAt,
       lastRead: root.lastRead,
       clientName: root.clientName,
       types: root.enabledTypes,
@@ -202,6 +213,11 @@ Item {
     root.synced = false
     root.resolving = true
     root.refreshingRelays = false
+    // A different identity starts its own resolve window: nothing from the
+    // previous key may be applied to this one.
+    root.bestRelayList = null
+    root.relayListAt = 0
+    root.pendingOutbox = 0
     root.relays = Nostr.bootstrapRelays()
     root.writeRelays = []
     root.updateConnectionUrls()
@@ -223,28 +239,78 @@ Item {
     root.synced = false
     root.resolving = false
     root.refreshingRelays = false
+    root.bestRelayList = null
+    root.relayListAt = 0
+    root.pendingOutbox = 0
     root.error = ""
     root.saveState()
   }
 
-  // No relay list published within the window - fall back to well-known relays.
+  // Kind 10002 is a replaceable event: the newest created_at wins, not the
+  // first relay to answer. Which relay answers first is luck, and an indexer
+  // can still be serving the list from before the last publish, so hold the
+  // newest answer and apply it when the resolve window closes.
+  function collectRelayList(ev) {
+    var created = Number(ev.created_at) || 0
+    if (root.bestRelayList === null || created > root.bestRelayList.created) {
+      var r = Nostr.readRelaysFromEvent(ev)
+      var w = Nostr.readWriteRelaysFromEvent(ev)
+      root.bestRelayList = {
+        created: created,
+        relays: r.length > 0 ? r : Nostr.fallbackRelays(),
+        writeRelays: w.length > 0 ? w : Nostr.fallbackRelays()
+      }
+    }
+    // An answer inside the window is applied on close; one arriving after it
+    // is a live list change and replaces the applied list straight away.
+    if (root.resolving || root.refreshingRelays) return
+    if (root.bestRelayList.created > root.relayListAt) root.applyRelayList(root.bestRelayList, false)
+  }
+
+  function applyRelayList(list, wasResolving) {
+    root.relayListAt = list.created
+    root.resolving = false
+    root.refreshingRelays = false
+    root.relays = list.relays
+    root.writeRelays = list.writeRelays
+    root.updateConnectionUrls()
+    root.saveState()
+    // Foreground setup resolves before any subscription exists; a
+    // background refresh must re-subscribe existing sockets so role
+    // changes (new write relays) take effect.
+    if (!wasResolving) root.resubscribe()
+  }
+
+  // Close the resolve window: apply the newest list seen, or fall back to
+  // well-known relays when no relay answered at all.
+  function finishRelayLookup() {
+    if (!root.resolving && !root.refreshingRelays) return
+    var wasResolving = root.resolving
+    root.resolving = false
+    root.refreshingRelays = false
+    root.pendingOutbox = 0
+    if (root.bestRelayList !== null && root.bestRelayList.created > root.relayListAt) {
+      root.applyRelayList(root.bestRelayList, wasResolving)
+      return
+    }
+    // Nothing newer than what is already applied: a background refresh must
+    // leave both lists exactly as they are. Mirroring the reads into the
+    // writes here - as the deadline handler does when nothing answered at all -
+    // would drop the outbox relays, and with them the mute list, on every
+    // session where the indexers simply confirm the list we already have.
+    if (!wasResolving) return
+    root.relays = Nostr.fallbackRelays()
+    root.writeRelays = Nostr.fallbackRelays()
+    root.updateConnectionUrls()
+    root.saveState()
+  }
+
+  // The deadline, and the fallback when no relay list arrives: the window
+  // normally closes on EOSE, this catches a relay that never answers.
   Timer {
     id: resolveTimer
     interval: 8000
-    onTriggered: {
-      if (root.refreshingRelays) {
-        root.refreshingRelays = false
-        root.writeRelays = root.relays.slice()
-        root.updateConnectionUrls()
-        root.saveState()
-      }
-      if (!root.resolving) return
-      root.resolving = false
-      root.relays = Nostr.fallbackRelays()
-      root.writeRelays = Nostr.fallbackRelays()
-      root.updateConnectionUrls()
-      root.saveState()
-    }
+    onTriggered: root.finishRelayLookup()
   }
 
   // Union of read + write relays; drives the Relay delegates. Read relays
@@ -290,16 +356,23 @@ Item {
     }
   }
 
+  // One outbox REQ per relay, counted so the resolve window can close as
+  // soon as every relay we asked has answered.
+  function askForRelayList(relay) {
+    root.pendingOutbox++
+    relay.sendRaw(JSON.stringify(["REQ", root.subOutbox, { kinds: [10002], authors: [root.pubkey], limit: 1 }]))
+  }
+
   function subscribeTo(relay) {
     if (root.pubkey === "") return
     if (root.resolving) {
-      relay.sendRaw(JSON.stringify(["REQ", root.subOutbox, { kinds: [10002], authors: [root.pubkey], limit: 1 }]))
+      root.askForRelayList(relay)
       return
     }
     // Background relay-list refresh: outbox lookup on bootstrap relays
     // while the normal subscriptions stay live everywhere else.
     if (root.refreshingRelays && Nostr.bootstrapRelays().indexOf(relay.url) !== -1) {
-      relay.sendRaw(JSON.stringify(["REQ", root.subOutbox, { kinds: [10002], authors: [root.pubkey], limit: 1 }]))
+      root.askForRelayList(relay)
     }
     if (root.relays.indexOf(relay.url) !== -1) {
       relay.sendRaw(JSON.stringify(["REQ", root.subFeed, feedFilter()]))
@@ -479,6 +552,13 @@ Item {
   }
 
   function handleEose(subId) {
+    if (subId === root.subOutbox) {
+      if (root.pendingOutbox > 0) root.pendingOutbox--
+      // Every relay we asked has answered: no newer list can arrive on this
+      // window, so stop waiting for the deadline.
+      if (root.pendingOutbox === 0) root.finishRelayLookup()
+      return
+    }
     if (subId === root.subFeed && !root.synced) {
       root.synced = true
       updateUnread()
@@ -488,20 +568,8 @@ Item {
   function handleEvent(ev, subId, relayUrl) {
     if (!ev || typeof ev.pubkey !== "string") return
 
-    if ((root.resolving || root.refreshingRelays) && Nostr.isMyRelayList(ev, root.pubkey)) {
-      var wasResolving = root.resolving
-      root.resolving = false
-      root.refreshingRelays = false
-      var r = Nostr.readRelaysFromEvent(ev)
-      root.relays = r.length > 0 ? r : Nostr.fallbackRelays()
-      var w = Nostr.readWriteRelaysFromEvent(ev)
-      root.writeRelays = w.length > 0 ? w : Nostr.fallbackRelays()
-      root.updateConnectionUrls()
-      root.saveState()
-      // Foreground setup resolves before any subscription exists; a
-      // background refresh must re-subscribe existing sockets so role
-      // changes (new write relays) take effect.
-      if (!wasResolving) root.resubscribe()
+    if (Nostr.isMyRelayList(ev, root.pubkey)) {
+      root.collectRelayList(ev)
       return
     }
 
